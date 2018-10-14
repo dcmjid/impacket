@@ -27,6 +27,7 @@ from impacket import LOG
 # So I'm setting a global variable to control this, this can also be set programmatically
 
 USE_NTLMv2 = True # if false will fall back to NTLMv1 (or NTLMv1 with ESS a.k.a NTLM2)
+TEST_CASE = False # Only set to True when running Test Cases
 
 
 def computeResponse(flags, serverChallenge, clientChallenge, serverName, domain, user, password, lmhash='', nthash='',
@@ -38,16 +39,12 @@ def computeResponse(flags, serverChallenge, clientChallenge, serverName, domain,
         return computeResponseNTLMv1(flags, serverChallenge, clientChallenge, serverName, domain, user, password,
                                      lmhash, nthash, use_ntlmv2=use_ntlmv2)
 try:
-    POW = None
-    from Crypto.Cipher import ARC4
-    from Crypto.Cipher import DES
-    from Crypto.Hash import MD4
+    from Cryptodome.Cipher import ARC4
+    from Cryptodome.Cipher import DES
+    from Cryptodome.Hash import MD4
 except Exception:
-    try:
-        import POW
-    except Exception:
-        LOG.critical("Warning: You don't have any crypto installed. You need PyCrypto")
-        LOG.critical("See http://www.pycrypto.org/")
+    LOG.critical("Warning: You don't have any crypto installed. You need pycryptodomex")
+    LOG.critical("See https://pypi.org/project/pycryptodomex/")
 
 NTLM_AUTH_NONE          = 1
 NTLM_AUTH_CONNECT       = 2
@@ -546,13 +543,8 @@ def __expand_DES_key( key):
     return s
 
 def __DES_block(key, msg):
-    if POW:
-        cipher = POW.Symmetric(POW.DES_ECB)
-        cipher.encryptInit(__expand_DES_key(key))
-        return cipher.update(msg)
-    else:
-        cipher = DES.new(__expand_DES_key(key),DES.MODE_ECB)
-        return cipher.encrypt(msg)
+    cipher = DES.new(__expand_DES_key(key),DES.MODE_ECB)
+    return cipher.encrypt(msg)
 
 def ntlmssp_DES_encrypt(key, challenge):
     answer  = __DES_block(key[:7], challenge)
@@ -709,10 +701,7 @@ def getNTLMSSPType3(type1, type2, user, password, domain, lmhash = '', nthash = 
 # NTLMv1 Algorithm
 
 def generateSessionKeyV1(password, lmhash, nthash):
-    if POW:
-        hash = POW.Digest(POW.MD4_DIGEST)
-    else:        
-        hash = MD4.new()
+    hash = MD4.new()
     hash.update(NTOWFv1(password, lmhash, nthash))
     return hash.digest()
 
@@ -767,10 +756,7 @@ def compute_nthash(password):
         import sys
         password = password.decode(sys.getfilesystemencoding()).encode('utf_16le')
 
-    if POW:
-        hash = POW.Digest(POW.MD4_DIGEST)
-    else:        
-        hash = MD4.new()
+    hash = MD4.new()
     hash.update(password)
     return hash.digest()
 
@@ -858,13 +844,8 @@ def SEALKEY(flags, randomSessionKey, mode = 'Client'):
 
 
 def generateEncryptedSessionKey(keyExchangeKey, exportedSessionKey):
-   if POW:
-       cipher = POW.Symmetric(POW.RC4)
-       cipher.encryptInit(keyExchangeKey)
-       cipher_encrypt = cipher.update
-   else:
-       cipher = ARC4.new(keyExchangeKey)
-       cipher_encrypt = cipher.encrypt
+   cipher = ARC4.new(keyExchangeKey)
+   cipher_encrypt = cipher.encrypt
 
    sessionKey = cipher_encrypt(exportedSessionKey)
    return sessionKey
@@ -892,16 +873,10 @@ def KXKEY(flags, sessionBaseKey, lmChallengeResponse, serverChallenge, password,
    return keyExchangeKey
       
 def hmac_md5(key, data):
-    if POW:
-        h = POW.Hmac(POW.MD5_DIGEST, key)
-        h.update(data)
-        result = h.mac()
-    else:
-        import hmac
-        h = hmac.new(key)
-        h.update(data)
-        result = h.digest()
-    return result
+    import hmac
+    h = hmac.new(key)
+    h.update(data)
+    return h.digest()
 
 def NTOWFv2( user, password, domain, hash = ''):
     if hash != '':
@@ -922,26 +897,22 @@ def computeResponseNTLMv2(flags, serverChallenge, clientChallenge, serverName, d
     responseKeyNT = NTOWFv2(user, password, domain, nthash)
     responseKeyLM = LMOWFv2(user, password, domain, lmhash)
 
-    # If you're running test-ntlm, comment the following lines and uncomment the ones that are commented. Don't forget
-    # to turn it back after the tests!
-    ######################
     av_pairs = AV_PAIRS(serverName)
     # In order to support SPN target name validation, we have to add this to the serverName av_pairs. Otherwise we will
     # get access denied
     # This is set at Local Security Policy -> Local Policies -> Security Options -> Server SPN target name validation
     # level
-    av_pairs[NTLMSSP_AV_TARGET_NAME] = 'cifs/'.encode('utf-16le') + av_pairs[NTLMSSP_AV_HOSTNAME][1]
-    if av_pairs[NTLMSSP_AV_TIME] is not None:
-       aTime = av_pairs[NTLMSSP_AV_TIME][1]
+    if TEST_CASE is False:
+        av_pairs[NTLMSSP_AV_TARGET_NAME] = 'cifs/'.encode('utf-16le') + av_pairs[NTLMSSP_AV_HOSTNAME][1]
+        if av_pairs[NTLMSSP_AV_TIME] is not None:
+           aTime = av_pairs[NTLMSSP_AV_TIME][1]
+        else:
+           aTime = struct.pack('<q', (116444736000000000 + calendar.timegm(time.gmtime()) * 10000000) )
+           av_pairs[NTLMSSP_AV_TIME] = aTime
+        serverName = av_pairs.getData()
     else:
-       aTime = struct.pack('<q', (116444736000000000 + calendar.timegm(time.gmtime()) * 10000000) )
-       #aTime = '\x00'*8
-       av_pairs[NTLMSSP_AV_TIME] = aTime
-    serverName = av_pairs.getData()
-          
-    ######################
-    #aTime = '\x00'*8
-    ######################
+        aTime = '\x00'*8
+
     temp = responseServerVersion + hiResponseServerVersion + '\x00' * 6 + aTime + clientChallenge + '\x00' * 4 + \
            serverName + '\x00' * 4
 

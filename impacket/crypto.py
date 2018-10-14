@@ -16,12 +16,14 @@
 #   [MS-LSAD] Section 5.1.2
 #   [MS-SAMR] Section 2.2.11.1.1
 
+from __future__ import division
+from __future__ import print_function
 from impacket import LOG
 try:
-    from Crypto.Cipher import DES, AES, ARC4
+    from Cryptodome.Cipher import DES, AES, ARC4
 except Exception:
-    LOG.error("Warning: You don't have any crypto installed. You need PyCrypto")
-    LOG.error("See http://www.pycrypto.org/")
+    LOG.error("Warning: You don't have any crypto installed. You need pycryptodomex")
+    LOG.error("See https://pypi.org/project/pycryptodomex/")
 from struct import pack, unpack
 from impacket.structure import Structure
 import hmac, hashlib
@@ -52,7 +54,7 @@ def Generate_Subkey(K):
 #   +                                                                   +
 #   +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-    AES_128 = AES.new(K)
+    AES_128 = AES.new(K, AES.MODE_ECB)
 
     L = AES_128.encrypt('\x00'*16)
 
@@ -138,10 +140,10 @@ def AES_CMAC(K, M, length):
     const_Bsize = 16
     const_Zero  = '\x00'*16
 
-    AES_128= AES.new(K)
+    AES_128= AES.new(K, AES.MODE_ECB)
     M      = M[:length]
     K1, K2 = Generate_Subkey(K)
-    n      = len(M)/const_Bsize
+    n      = len(M)//const_Bsize
 
     if n == 0:
         n = 1
@@ -198,7 +200,7 @@ def AES_CMAC_PRF_128(VK, M, VKlen, Mlen):
         K = AES_CMAC('\x00'*16, VK, VKlen)
 
     PRV = AES_CMAC(K, M, Mlen)
- 
+
     return PRV
 
 def KDF_CounterMode(KI, Label, Context, L):
@@ -218,24 +220,24 @@ def KDF_CounterMode(KI, Label, Context, L):
 #  5. Return: KO := the leftmost L bits of result(n).
     h = 256
     r = 32
-    
-    n = L / h
+
+    n = L // h
 
     if n == 0:
         n = 1
 
     if n > (pow(2,r)-1):
-        raise "Error computing KDF_CounterMode"
+        raise Exception("Error computing KDF_CounterMode")
 
     result = ''
     K      = ''
 
     for i in range(1,n+1):
        input = pack('>L', i) + Label + '\x00' + Context + pack('>L',L)
-       K = hmac.new(KI, input, hashlib.sha256).digest() 
+       K = hmac.new(KI, input, hashlib.sha256).digest()
        result = result + K
- 
-    return result[:(L/8)]      
+
+    return result[:(L//8)]
 
 # [MS-LSAD] Section 5.1.2 / 5.1.3
 class LSA_SECRET_XP(Structure):
@@ -272,7 +274,7 @@ def decryptSecret(key, value):
         tmpStrKey = key0[:7]
         tmpKey = transformKey(tmpStrKey)
         Crypt1 = DES.new(tmpKey, DES.MODE_ECB)
-        plainText += Crypt1.decrypt(cipherText) 
+        plainText += Crypt1.decrypt(cipherText)
         cipherText = cipherText[8:]
         key0 = key0[7:]
         value = value[8:]
@@ -296,7 +298,7 @@ def encryptSecret(key, value):
         tmpStrKey = key0[:7]
         tmpKey = transformKey(tmpStrKey)
         Crypt1 = DES.new(tmpKey, DES.MODE_ECB)
-        cipherText += Crypt1.encrypt(plainText) 
+        cipherText += Crypt1.encrypt(plainText)
         plainText = plainText[8:]
         key0 = key0[7:]
         value0 = value0[8:]
@@ -322,7 +324,7 @@ def SamDecryptNTLMHash(encryptedHash, key):
     plain1 = Crypt1.decrypt(Block1)
     plain2 = Crypt2.decrypt(Block2)
 
-    return plain1 + plain2 
+    return plain1 + plain2
 
 def SamEncryptNTLMHash(encryptedHash, key):
     # [MS-SAMR] Section 2.2.11.1.1
@@ -340,7 +342,7 @@ def SamEncryptNTLMHash(encryptedHash, key):
     plain1 = Crypt1.encrypt(Block1)
     plain2 = Crypt2.encrypt(Block2)
 
-    return plain1 + plain2 
+    return plain1 + plain2
 
 
 
@@ -379,46 +381,48 @@ if __name__ == '__main__':
 #                  f69f2445 df4f9b17 ad2b417b e66c3710
 #   AES-CMAC       51f0bebf 7e3b9d92 fc497417 79363cfe
 #  --------------------------------------------------
-    def pp(s):
-        for i in range((len(s)/8)):
-            print s[:8] ,
+    def pp(prev ,s):
+        print (prev, end= ' ')
+        for i in range((len(s)//8)):
+            print("%s" % (s[:8]), end = ' ')
             s = s[8:]
 
+        print()
         return ''
-    
+
     from binascii import hexlify, unhexlify
 
     K = "2b7e151628aed2a6abf7158809cf4f3c"
     M = "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710"
 
     K1, K2 = Generate_Subkey(unhexlify(K))
-    print "Subkey Generation"
-    print "K               ", pp(K)
-    print "K1              ", pp(hexlify(K1))
-    print "K2              ", pp(hexlify(K2))
-    print 
-    print "Example 1: len = 0"
-    print "M                <empty string>"
-    print "AES-CMAC        " , pp(hexlify(AES_CMAC(unhexlify(K),unhexlify(M),0)))
-    print 
-    print "Example 2: len = 16"
-    print "M               " , pp(M[:16*2])
-    print "AES-CMAC        " , pp(hexlify(AES_CMAC(unhexlify(K),unhexlify(M),16)))
-    print 
-    print "Example 3: len = 40"
-    print "M               " , pp(M[:40*2])
-    print "AES-CMAC        " , pp(hexlify(AES_CMAC(unhexlify(K),unhexlify(M),40)))
-    print 
-    print "Example 3: len = 64"
-    print "M               " , pp(M[:64*2])
-    print "AES-CMAC        " , pp(hexlify(AES_CMAC(unhexlify(K),unhexlify(M),64)))
-    print 
+    print("Subkey Generation")
+    pp("K               ", (K))
+    pp("K1              ", (hexlify(K1)))
+    pp("K2              ", (hexlify(K2)))
+    print()
+    print("Example 1: len = 0")
+    print("M                <empty string>")
+    pp("AES-CMAC        " , (hexlify(AES_CMAC(unhexlify(K),unhexlify(M),0))))
+    print()
+    print("Example 2: len = 16")
+    pp("M               " , (M[:16*2]))
+    pp("AES-CMAC        " , (hexlify(AES_CMAC(unhexlify(K),unhexlify(M),16))))
+    print()
+    print("Example 3: len = 40")
+    pp("M               " , (M[:40*2]))
+    pp("AES-CMAC        " , (hexlify(AES_CMAC(unhexlify(K),unhexlify(M),40))))
+    print()
+    print("Example 3: len = 64")
+    pp("M               " , (M[:64*2]))
+    pp("AES-CMAC        " , (hexlify(AES_CMAC(unhexlify(K),unhexlify(M),64))))
+    print()
     M = "eeab9ac8fb19cb012849536168b5d6c7a5e6c5b2fcdc32bc29b0e3654078a5129f6be2562046766f93eebf146b"
     K = "6c3473624099e17ff3a39ff6bdf6cc38"
     # Mac = dbf63fd93c4296609e2d66bf79251cb5
-    print "Example 4: len = 45"
-    print "M               " , pp(M[:45*2])
-    print "AES-CMAC        " , pp(hexlify(AES_CMAC(unhexlify(K),unhexlify(M),45)))
+    print("Example 4: len = 45")
+    pp("M               " , (M[:45*2]))
+    pp("AES-CMAC        " , (hexlify(AES_CMAC(unhexlify(K),unhexlify(M),45))))
 
 #   ------------------------------------------------------------
 #
@@ -445,23 +449,23 @@ if __name__ == '__main__':
     K = "000102030405060708090a0b0c0d0e0fedcb"
     M = "000102030405060708090a0b0c0d0e0f10111213"
 
-    print "AES-CMAC-PRF-128 Test Vectors"
-    print
-    print "Example 1: len = 0"
-    print "M               " , pp(K)
-    print "Key Length       18 "  
-    print "AES-CMAC        " , pp(hexlify(AES_CMAC_PRF_128(unhexlify(K),unhexlify(M),18,len(unhexlify(M)))))
-    print 
-    print "Example 1: len = 0"
-    print "M               " , pp(K)
-    print "Key Length       16 "  
-    print "AES-CMAC        " , pp(hexlify(AES_CMAC_PRF_128(unhexlify(K)[:16],unhexlify(M),16,len(unhexlify(M)))))
-    print 
-    print "Example 1: len = 0"
-    print "M               " , pp(K)
-    print "Key Length       10 "  
-    print "AES-CMAC        " , pp(hexlify(AES_CMAC_PRF_128(unhexlify(K)[:10],unhexlify(M),10,len(unhexlify(M)))))
-    print 
+    print("AES-CMAC-PRF-128 Test Vectors")
+    print()
+    print("Example 1: len = 0")
+    pp("M               " , (K))
+    print("Key Length       18 ")
+    pp("AES-CMAC        " , (hexlify(AES_CMAC_PRF_128(unhexlify(K),unhexlify(M),18,len(unhexlify(M))))))
+    print()
+    print("Example 1: len = 0")
+    pp("M               " , (K))
+    print("Key Length       16 ")
+    pp("AES-CMAC        " , (hexlify(AES_CMAC_PRF_128(unhexlify(K)[:16],unhexlify(M),16,len(unhexlify(M))))))
+    print()
+    print("Example 1: len = 0")
+    pp("M               " , (K))
+    print("Key Length       10 ")
+    pp("AES-CMAC        " , (hexlify(AES_CMAC_PRF_128(unhexlify(K)[:10],unhexlify(M),10,len(unhexlify(M))))))
+    print()
 
 
 
